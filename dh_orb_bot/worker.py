@@ -24,7 +24,7 @@ STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
 os.makedirs(STATE_DIR, exist_ok=True)
 SENT_FILE = os.path.join(STATE_DIR, "sent.json")
 JOURNAL = os.path.join(STATE_DIR, "journal.jsonl")
-HIST_CAL_DAYS = 45          # calendar days of 1-min history to load (20 trading days + spare)
+HIST_CAL_DAYS = 60          # calendar days of 1-min history to load (20 trading days + spare)
 FRESH_MIN = 10              # only alert events younger than this (minutes) – avoids stale alerts after a restart
 
 
