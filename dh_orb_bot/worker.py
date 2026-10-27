@@ -331,6 +331,31 @@ class Worker:
             out.append(row)
         return out[-n:][::-1]
 
+    # ---------------- chart data for the dashboard ----------------
+    def available_days(self, n=15):
+        days = sorted((d for d, a in self.spx.items() if np.sum(~np.isnan(a[:, 3])) > 0), reverse=True)
+        return days[:n]
+
+    def chart_day(self, d):
+        """candles (ET wall-clock as epoch seconds) + levels + signal for one day"""
+        if d not in self.spx:
+            return None
+        bars, v1d, vix = self.day_arrays(d)
+        days = sorted(x for x, a in self.spx.items() if x < d and np.sum(~np.isnan(a[:, 3])) >= 300)[-self.cfg["look_n"]:]
+        hist = [self.sq_cache.setdefault(q, E.returns_sq(self.spx[q][:, 3])) for q in days]
+        today = datetime.now(ET).date().isoformat()
+        n_done = (self.state.get("today") or {}).get("n_done", 390) if d == today else 390
+        r = E.evaluate_day(d, bars, v1d, vix, hist, n_done, self.cfg)
+        y, m, dd = map(int, d.split("-"))
+        base = int(datetime(y, m, dd, 9, 30).replace(tzinfo=ZoneInfo("UTC")).timestamp())   # ET wall time shown as UTC
+        candles = [dict(time=base + i * 60, open=float(b[0]) if not np.isnan(b[0]) else float(b[3]), high=float(b[1]),
+                        low=float(b[2]), close=float(b[3])) for i, b in enumerate(bars[:n_done]) if not np.isnan(b[3])]
+        tr = self.state.get("trade") or {}
+        out = dict(date=d, candles=candles, r=r, base=base)
+        if d == today and tr.get("date") == d:
+            out["trade"] = tr
+        return json.loads(json.dumps(out, default=_json))
+
     # ---------------- run ----------------
     async def session(self):
         self.dx = DXLink(self.auth, self.on_event)

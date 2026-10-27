@@ -9,8 +9,10 @@ import math
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import engine as E
+from chart import chart_html
 from worker import Worker
 
 st.set_page_config(page_title="DH ORB-H", page_icon="📈", layout="wide")
@@ -84,6 +86,32 @@ def live():
             st.write(f"QuantGlide-style (Δ ≤ {E.CFG['max_delta']}): **{f(tr['qg_short'],0)} / {f(tr['qg_long'],0)}** · "
                      f"${f(tr.get('qg_credit'))} · Δ {f(tr.get('qg_delta'),3)}")
 
+
+
+live()
+
+
+@st.fragment(run_every="20s")
+def day_chart():
+    days = w.available_days()
+    if not days:
+        st.info("chart: waiting for data…")
+        return
+    sel = st.selectbox("Chart", days, index=0, key="chart_day", label_visibility="collapsed")
+    data = w.chart_day(sel)
+    if data and data["candles"]:
+        components.html(chart_html(data, 520), height=530)
+    else:
+        st.info(f"no bars yet for {sel}")
+
+
+st.subheader("Chart")
+day_chart()
+
+
+@st.fragment(run_every="30s")
+def history_log():
+    s = w.snapshot()
     h = s.get("history") or []
     if h:
         st.subheader("Recent days")
@@ -92,6 +120,6 @@ def live():
         st.code("\n".join(s.get("log", [])[:60]) or "–")
 
 
-live()
+history_log()
 st.caption("Rules: 61-bar opening range · 0.055% trigger · first break by 13:30 · ratio > 1.2 (1.0 if VIX < 16) · "
            "VIX1D rise < 2 · VIX ≤ 35 · no FOMC · 1.16× EM strike, 15 wide · min credit $0.30 · hold to close")
