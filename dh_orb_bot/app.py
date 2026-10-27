@@ -13,6 +13,7 @@ import streamlit.components.v1 as components
 
 import engine as E
 from chart import chart_html
+from version import __version__
 from worker import Worker
 
 st.set_page_config(page_title="DH ORB-H", page_icon="📈", layout="wide")
@@ -35,6 +36,10 @@ def get_worker():
 
 
 w = get_worker()
+STALE = getattr(w, "version", None) != __version__
+if STALE:
+    st.error(f"New code v{__version__} is deployed but the running bot is v{getattr(w, 'version', 'old')}. "
+             "Click **Manage app → Reboot app** (bottom right) to switch the bot to the new version.")
 
 
 def f(x, nd=2):
@@ -42,6 +47,7 @@ def f(x, nd=2):
 
 
 st.title("DH ORB-H · SPX 0DTE breakout spreads")
+st.caption(f"v{__version__}")
 
 c1, c2 = st.columns([3, 1])
 with c2:
@@ -93,6 +99,9 @@ live()
 
 @st.fragment(run_every="20s")
 def day_chart():
+    if STALE or not hasattr(w, "available_days"):
+        st.info("chart available after reboot")
+        return
     days = w.available_days()
     if not days:
         st.info("chart: waiting for data…")
@@ -115,7 +124,7 @@ def history_log():
     h = s.get("history") or []
     if h:
         st.subheader("Recent days")
-        st.dataframe(pd.DataFrame(h)[["date", "signal", "strikes", "decision", "result"]], hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(h)[["date", "signal", "strikes", "decision", "result"]], hide_index=True, width="stretch")
     with st.expander("Bot log"):
         st.code("\n".join(s.get("log", [])[:60]) or "–")
 

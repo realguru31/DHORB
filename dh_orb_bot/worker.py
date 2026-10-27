@@ -18,6 +18,7 @@ import requests
 
 import engine as E
 from feed import DXLink, TastyAuth, spxw_chain
+from version import __version__
 
 ET = ZoneInfo("America/New_York")
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
@@ -35,6 +36,7 @@ def f2(x, nd=2):
 class Worker:
     def __init__(self, secrets, cfg=None):
         self.s = secrets
+        self.version = __version__
         self.cfg = dict(E.CFG, **(cfg or {}))
         self.auth = TastyAuth(secrets["TT_CLIENT_SECRET"], secrets["TT_REFRESH_TOKEN"])
         self.account = float(secrets.get("ACCOUNT_SIZE", 0) or 0)
@@ -262,7 +264,7 @@ class Worker:
 
         # heartbeat (first tick of the day between 9:00 and 16:00)
         if 9 * 60 <= now.hour * 60 + now.minute < 16 * 60:
-            await self.send(f"{d}:hb", f"🤖 <b>DH ORB-H bot running</b> – {d}\nHistory {len(hist)}/{self.cfg['look_n']} days · "
+            await self.send(f"{d}:hb", f"🤖 <b>DH ORB-H bot v{__version__} running</b> – {d}\nHistory {len(hist)}/{self.cfg['look_n']} days · "
                                        f"feed OK{' · FOMC day: no trade' if d in E.FOMC else ''}")
         if secs <= 0:
             return
