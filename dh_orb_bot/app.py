@@ -21,10 +21,14 @@ st.set_page_config(page_title="DH ORB-H", page_icon="📈", layout="wide")
 # ---------- optional password ----------
 pw = st.secrets.get("APP_PASSWORD")
 if pw and not st.session_state.get("ok"):
-    p = st.text_input("Password", type="password")
-    if p == pw:
-        st.session_state.ok = True
-        st.rerun()
+    with st.form("login"):
+        p = st.text_input("Password", type="password")
+        go_in = st.form_submit_button("Log in")
+    if go_in:
+        if p == pw:
+            st.session_state.ok = True
+            st.rerun()
+        st.error("Wrong password")
     st.stop()
 
 
@@ -91,6 +95,51 @@ def live():
         if tr.get("qg_short"):
             st.write(f"QuantGlide-style (Δ ≤ {E.CFG['max_delta']}): **{f(tr['qg_short'],0)} / {f(tr['qg_long'],0)}** · "
                      f"${f(tr.get('qg_credit'))} · Δ {f(tr.get('qg_delta'),3)}")
+
+    # ---------- entry credit sampling + P&L ----------
+    if tr.get("date") == r.get("date") and tr.get("short") is not None:
+        n = E.contracts(float(st.secrets.get("ACCOUNT_SIZE", 0) or 0), tr.get("entry") or tr.get("credit") or 0.4)
+        label = "Open trade" if tr.get("go") else "Skipped signal (tracked for comparison only)"
+        st.subheader(label)
+        if tr.get("samples") is None:
+            st.write(f"Sampling the spread every 5 s for 1 minute after {tr.get('sig_time')} …")
+        else:
+            st.write(f"Entry credit **${f(tr.get('entry'))}** (most common of {len(tr['samples'])} readings, "
+                     f"range ${f(tr.get('smin'))}–${f(tr.get('smax'))}, sampled to {tr.get('sampled_at')}) · "
+                     f"{f(tr['short'],0)} / {f(tr['long'],0)} {'P' if tr['side']=='put' else 'C'}")
+            rows = tr.get("pnl") or []
+            if rows:
+                last = rows[-1]
+                a, b, c = st.columns(3)
+                a.metric(f"Ours · P&L per contract ({last['t']})", f"${f(last.get('ours_pnl'),0)}",
+                         help=f"spread now ${f(last.get('ours'))} vs entry ${f(tr.get('entry'))}")
+                mx = (tr.get("entry") or 0) * 100
+                b.metric("% of max profit", f"{f(100 * last['ours_pnl'] / mx, 0)}%" if mx and last.get("ours_pnl") is not None else "–")
+                c.metric(f"× {n} contracts" if n else "SPX − short strike",
+                         f"${f(last['ours_pnl'] * n, 0)}" if n and last.get("ours_pnl") is not None else
+                         f(abs((last.get('spx') or 0) - tr['short']), 1))
+            else:
+                st.caption("first P&L reading 5 minutes after sampling")
+        # QuantGlide comparison (does not affect our trade)
+        if tr.get("qg_cands") is not None:
+            with st.expander(f"QuantGlide comparison – delta {w.cfg['qg_lo']:.2f}–{w.cfg['qg_hi']:.2f} (does not change our trade)", expanded=True):
+                lo, hi = st.columns(2)
+                nlo = lo.number_input("his delta low", 0.01, 0.50, float(w.cfg["qg_lo"]), 0.01, key="qglo")
+                nhi = hi.number_input("his delta high", 0.01, 0.50, float(w.cfg["qg_hi"]), 0.01, key="qghi")
+                if (nlo, nhi) != (w.cfg["qg_lo"], w.cfg["qg_hi"]):
+                    w.set_qg_range(nlo, nhi)
+                cands = tr.get("qg_cands") or []
+                if cands:
+                    st.dataframe(pd.DataFrame(cands).rename(columns=dict(short="short", long="long", delta="Δ (median)", credit="credit (most common)", cmin="min", cmax="max")),
+                                 hide_index=True, width="stretch")
+                    st.write(f"Likely pick (Δ nearest {w.cfg['qg_target']}): **{f(tr.get('qg_track_short'),0)} / {f(tr.get('qg_track_long'),0)}** · "
+                             f"entry ${f(tr.get('qg_track_entry'))} · Δ {f(tr.get('qg_track_delta'),3)}")
+                else:
+                    st.write("no spread in that delta range")
+        rows = tr.get("pnl") or []
+        if rows:
+            st.dataframe(pd.DataFrame(rows).rename(columns=dict(t="time", spx="SPX", ours="ours mid", ours_pnl="ours P&L $", qg="QG mid", qg_pnl="QG P&L $")),
+                         hide_index=True, width="stretch")
 
 
 

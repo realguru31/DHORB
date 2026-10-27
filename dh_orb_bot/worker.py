@@ -50,6 +50,8 @@ class Worker:
         self.dx = None
         self.loop = None
         self._hist_cache = {}
+        self.track_task = None
+        self.ladder = {}                 # strike -> [(credit, |delta|), ...] sampled in the minute after the trigger
 
     # ---------------- persistence / telegram ----------------
     def _load_sent(self):
@@ -202,6 +204,160 @@ class Worker:
             out.update(qg_short=kq, qg_long=klq, qg_credit=cq, qg_delta=deltas.get(kq))
         return out
 
+    # ---------------- after the trigger: 1-minute credit sampling + P&L every 5 minutes ----------------
+    def _mid(self, sym, since=0):
+        q = self.quotes.get(sym)
+        if not q or q[0] is None or q[1] is None or q[2] < since:
+            return None
+        return (q[0] + q[1]) / 2
+
+    def _legs(self, side, k):
+        w, pc = self.cfg["width"], (0 if side == "put" else 1)
+        kl = k - w if side == "put" else k + w
+        a, b = self.chain.get(float(k)), self.chain.get(float(kl))
+        return (a[pc] if a else None), (b[pc] if b else None), kl
+
+    def _spread_mid(self, side, k, since=0):
+        s1, s2, _ = self._legs(side, k)
+        a, b = self._mid(s1, since), self._mid(s2, since)
+        return round(a - b, 2) if a is not None and b is not None else None
+
+    @staticmethod
+    def _mode(vals):
+        """most common value after rounding to $0.05 (ties -> closest to the median)"""
+        if not vals:
+            return None
+        from collections import Counter
+        r = [round(v * 20) / 20 for v in vals]
+        c = Counter(r)
+        top = max(c.values())
+        tied = [v for v, n in c.items() if n == top]
+        med = float(np.median(r))
+        return round(min(tied, key=lambda v: abs(v - med)), 2)
+
+    def _save_trade(self, tr):
+        try:
+            with open(os.path.join(STATE_DIR, f"trade_{tr['date']}.json"), "w") as f:
+                json.dump(dict(tr, ladder={str(k): v for k, v in self.ladder.items()}), f, default=_json)
+        except Exception:
+            pass
+
+    def qg_pick(self, tr=None):
+        """QuantGlide comparison: spreads whose short delta is in [qg_lo, qg_hi]; likely pick = nearest qg_target"""
+        tr = tr if tr is not None else self.state.get("trade") or {}
+        lo, hi, tgt = self.cfg["qg_lo"], self.cfg["qg_hi"], self.cfg["qg_target"]
+        cands = []
+        for k, v in self.ladder.items():
+            if not v:
+                continue
+            dl = float(np.median([x[1] for x in v]))
+            if lo <= dl <= hi:
+                cr = [x[0] for x in v]
+                cands.append(dict(short=k, long=self._legs(tr.get("side", "put"), k)[2], delta=round(dl, 3),
+                                  credit=self._mode(cr), cmin=min(cr), cmax=max(cr)))
+        cands.sort(key=lambda c: c["short"], reverse=(tr.get("side") == "put"))
+        pick = min(cands, key=lambda c: abs(c["delta"] - tgt)) if cands else None
+        tr["qg_cands"] = cands
+        if pick:
+            tr.update(qg_track_short=pick["short"], qg_track_long=pick["long"], qg_track_entry=pick["credit"], qg_track_delta=pick["delta"])
+        return tr
+
+    def set_qg_range(self, lo, hi):
+        self.cfg["qg_lo"], self.cfg["qg_hi"] = float(lo), float(hi)
+        with self.lock:
+            tr = self.state.get("trade") or {}
+            if tr:
+                self.qg_pick(tr)
+                self._save_trade(tr)
+
+    async def post_trigger(self, d, r, tr, sample=True):
+        """1) every 5 s for 60 s: our spread + ladder credits/deltas; 2) every 5 min until 16:00: P&L"""
+        try:
+            side = r["side"]
+            if self.chain_date != d:
+                self.chain = await asyncio.get_running_loop().run_in_executor(None, spxw_chain, self.auth, d)
+                self.chain_date = d
+            if sample and tr.get("short") is not None:
+                S, em = r["S"], r.get("em") or 30
+                ks = sorted(self.chain)
+                lad = [k for k in ks if S - 3.2 * em - 20 <= k <= S] if side == "put" else [k for k in ks if S <= k <= S + 3.2 * em + 20]
+                pc = 0 if side == "put" else 1
+                syms = {k: self.chain[k][pc] for k in lad}
+                subs = [{"type": t, "symbol": x} for x in syms.values() for t in ("Quote", "Greeks")]
+                await self.dx.subscribe(subs)
+                ours, self.ladder = [], {k: [] for k in lad}
+                for i in range(12):
+                    await asyncio.sleep(5)
+                    c = self._spread_mid(side, tr["short"])
+                    if c is not None:
+                        ours.append(c)
+                    for k, x in syms.items():
+                        cr, g = self._spread_mid(side, k), self.greeks.get(x)
+                        if cr is not None and g and g[0] is not None:
+                            self.ladder[k].append((cr, abs(g[0])))
+                await self.dx.unsubscribe(subs)
+                with self.lock:
+                    tr.update(samples=ours, entry=self._mode(ours), smin=min(ours) if ours else None, smax=max(ours) if ours else None,
+                              sampled_at=datetime.now(ET).strftime("%H:%M"), pnl=[])
+                    self.qg_pick(tr)
+                    self.state["trade"] = tr
+                self._save_trade(tr)
+                self.log(f"entry credit sampled: {len(ours)} readings, most common ${tr.get('entry')}")
+            # ---- P&L every 5 minutes until the close ----
+            start = datetime.now(ET)
+            while True:
+                now = datetime.now(ET)
+                close_t = now.replace(hour=16, minute=0, second=0, microsecond=0)
+                if now.date().isoformat() != d or now >= close_t:
+                    break
+                nxt = start + timedelta(minutes=5 * (int((now - start).total_seconds() // 300) + 1))
+                await asyncio.sleep(max(1, min((nxt - now).total_seconds(), (close_t - now).total_seconds())))
+                if datetime.now(ET) >= close_t:
+                    break
+                legs = list(self._legs(side, tr["short"])[:2])
+                if tr.get("qg_track_short") is not None:
+                    legs += list(self._legs(side, tr["qg_track_short"])[:2])
+                legs = [x for x in legs if x]
+                t0 = time.time()
+                await self.dx.subscribe([{"type": "Quote", "symbol": x} for x in legs])
+                await asyncio.sleep(4)
+                await self.dx.unsubscribe([{"type": "Quote", "symbol": x} for x in legs])
+                ours_now = self._spread_mid(side, tr["short"], t0)
+                qg_now = self._spread_mid(side, tr["qg_track_short"], t0) if tr.get("qg_track_short") is not None else None
+                spx = (self.state.get("today") or {})
+                bars = self.spx.get(d)
+                last = float(bars[~np.isnan(bars[:, 3]), 3][-1]) if bars is not None and np.any(~np.isnan(bars[:, 3])) else None
+                row = dict(t=datetime.now(ET).strftime("%H:%M"), spx=last, ours=ours_now,
+                           ours_pnl=round((tr["entry"] - ours_now) * 100, 0) if ours_now is not None and tr.get("entry") is not None else None,
+                           qg=qg_now,
+                           qg_pnl=round((tr["qg_track_entry"] - qg_now) * 100, 0) if qg_now is not None and tr.get("qg_track_entry") is not None else None)
+                with self.lock:
+                    tr.setdefault("pnl", []).append(row)
+                self._save_trade(tr)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.log(f"P&L tracker error: {e!r}")
+
+    def resume_trade(self):
+        """after a restart: reload today's trade and keep tracking P&L"""
+        d = datetime.now(ET).date().isoformat()
+        p = os.path.join(STATE_DIR, f"trade_{d}.json")
+        if not os.path.exists(p) or (self.track_task and not self.track_task.done()):
+            return
+        try:
+            with open(p) as f:
+                tr = json.load(f)
+            self.ladder = {float(k): [tuple(x) for x in v] for k, v in (tr.pop("ladder", {}) or {}).items()}
+            with self.lock:
+                self.state["trade"] = tr
+            if tr.get("entry") is not None:
+                r = dict(side=tr["side"], S=tr.get("S"), em=tr.get("em"))
+                self.track_task = asyncio.get_running_loop().create_task(self.post_trigger(d, r, tr, sample=False))
+                self.log("resumed P&L tracking after restart")
+        except Exception as e:
+            self.log(f"resume failed: {e!r}")
+
     # ---------------- messages ----------------
     def msg_signal(self, r, oc, late=False):
         cfg = self.cfg
@@ -288,10 +444,14 @@ class Worker:
                 except Exception as e:
                     oc = dict(err=str(e)[:80])
                 text, go, tk = self.msg_signal(r, oc, late=age > FRESH_MIN)
+                tr = dict(date=d, go=go, side=r["side"], short=tk[0], long=tk[1], credit=tk[2], S=r["S"], em=r.get("em"),
+                          sig_time=r["sig_time"], **oc)
                 with self.lock:
-                    self.state["trade"] = dict(date=d, go=go, side=r["side"], short=tk[0], long=tk[1], credit=tk[2], **oc)
+                    self.state["trade"] = tr
                 self.journal(dict(r, **oc, go=go, traded=tk))
                 await self.send(f"{d}:signal_msg", text)
+                if tk[0] is not None:
+                    self.track_task = asyncio.get_running_loop().create_task(self.post_trigger(d, r, tr))
             else:
                 self._mark(f"{d}:signal")
         if r.get("status", "").startswith("no breakout") and f"{d}:nobreak" not in self.sent:
@@ -324,7 +484,7 @@ class Worker:
             row = dict(date=d, hist=len(hist))
             if r.get("status") == "signal":
                 row.update(signal=f"{'▲ put' if r['side']=='put' else '▼ call'} {r['sig_time']}", strikes=f"{f2(r.get('short'),0)}/{f2(r.get('long'),0)}",
-                           decision="TRADE" if r["gate"] else f"skip {f2(r['ratio'])}",
+                           decision="TRADE" if r["gate"] else f"skip – {r['why'] or 'ratio ' + f2(r['ratio'])}",
                            result={0: "WIN", 1: "LOSS", 2: "MAX LOSS"}.get(r.get("cat"), "–") if r["gate"] else
                            ("(would win)" if r.get("cat") == 0 else "(would lose)"))
             else:
@@ -367,6 +527,7 @@ class Worker:
         with self.lock:
             self.state["feed"] = "connected"
         self.log("feed connected, loading history…")
+        self.resume_trade()
 
         async def ticker():
             last_hist = 0

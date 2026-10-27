@@ -24,8 +24,11 @@ CFG = dict(
     width=15,
     step=5,
     min_credit=0.30,    # skip below this mid credit
-    max_delta=0.095,    # QuantGlide-style pick: closest strike with |delta| <= this
+    max_delta=0.105,    # QuantGlide-style pick: closest strike with |delta| <= this (matched his Oct 27 strike at 0.101)
     risk_pct=5.0,       # sizing: max loss per trade as % of account
+    qg_lo=0.08,         # QuantGlide comparison: delta range he quotes ...
+    qg_hi=0.12,
+    qg_target=0.10,     # ... and his likely pick = strike nearest this delta
 )
 
 FOMC = {
