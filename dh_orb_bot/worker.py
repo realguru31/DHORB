@@ -232,6 +232,9 @@ class Worker:
             if n is not None:
                 lines.append(f"Size @{cfg['risk_pct']:.0f}%: <b>{n}</b> contracts (max loss ${(cfg['width']-trade_k[2])*100:,.0f} each)")
             lines.append("Limit at mid · lower $0.05 once if no fill · no stop · hold to close")
+        lag = r.get("v1d_lag", 0)
+        if lag and lag > 2:
+            lines.append(f"⚠ VIX1D data {lag} min old at the signal – ratio may be off, check VIX1D before trading")
         if oc.get("err"):
             lines.append(f"⚠ option prices unavailable: {oc['err']} – check credit manually")
         return "\n".join(lines), go, trade_k
@@ -276,6 +279,8 @@ class Worker:
             age = mins_since(*map(int, r["sig_time"].split(":")))
             if age < 30:
                 self._mark(f"{d}:signal")
+                vv = ~np.isnan(v1d[: r["sig_idx"] + 1])
+                r["v1d_lag"] = int(r["sig_idx"] - np.flatnonzero(vv)[-1]) if vv.any() else 999
                 try:
                     oc = await self.option_check(r) if r.get("short") is not None else dict(err="no VIX1D")
                 except Exception as e:
