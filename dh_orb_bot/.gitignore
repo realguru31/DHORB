@@ -1,4 +1,0 @@
-.streamlit/secrets.toml
-state/
-__pycache__/
-*.pyc
